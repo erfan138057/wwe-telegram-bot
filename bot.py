@@ -21,13 +21,14 @@ HEADERS = {
 def load_sent() -> set:
     if os.path.exists(SENT_FILE):
         with open(SENT_FILE) as f:
-            return set(json.load(f))
+            data = json.load(f)
+            return set(data.get("urls", []))
     return set()
 
 
 def save_sent(sent: set):
     with open(SENT_FILE, "w") as f:
-        json.dump(list(sent), f)
+        json.dump({"urls": list(sent), "updated": datetime.utcnow().isoformat()}, f, indent=2)
 
 
 def scrape_wwe_articles() -> list[dict]:
@@ -38,7 +39,6 @@ def scrape_wwe_articles() -> list[dict]:
 
     articles = []
 
-    # Primary card articles
     for card in soup.select("a[href*='/articles/']"):
         href = card.get("href", "")
         if not href:
@@ -46,15 +46,13 @@ def scrape_wwe_articles() -> list[dict]:
 
         full_url = href if href.startswith("http") else "https://bleacherreport.com" + href
 
-        # Title: look inside the link or use aria-label
         title = (
             card.get("aria-label")
-            or card.select_one("h1, h2, h3, h4, [class*='title'], [class*='headline']")
+            or (card.select_one("h1, h2, h3, h4, [class*='title'], [class*='headline']") or None)
             and card.select_one("h1, h2, h3, h4, [class*='title'], [class*='headline']").get_text(strip=True)
             or card.get_text(strip=True)
         )
 
-        # Image
         img_tag = card.select_one("img")
         image_url = None
         if img_tag:
@@ -63,14 +61,12 @@ def scrape_wwe_articles() -> list[dict]:
                 or img_tag.get("data-src")
                 or img_tag.get("data-lazy-src")
             )
-            # skip tiny placeholder/base64 images
             if image_url and (image_url.startswith("data:") or len(image_url) < 20):
                 image_url = None
 
         if title and len(title) > 10 and full_url not in [a["url"] for a in articles]:
             articles.append({"title": title, "url": full_url, "image": image_url})
 
-    # Deduplicate by URL while preserving order
     seen = set()
     unique = []
     for a in articles:
@@ -78,7 +74,7 @@ def scrape_wwe_articles() -> list[dict]:
             seen.add(a["url"])
             unique.append(a)
 
-    return unique[:20]  # max 20 articles per run
+    return unique[:20]
 
 
 def send_telegram(article: dict):
@@ -97,7 +93,6 @@ def send_telegram(article: dict):
             "parse_mode": "HTML",
         }
         resp = requests.post(api_url, json=payload, timeout=15)
-        # If photo fails (bad URL etc.), fall back to text message
         if not resp.ok:
             send_text_only(caption)
     else:
@@ -118,8 +113,13 @@ def send_text_only(caption: str):
 def main():
     print(f"[{datetime.utcnow().isoformat()}] Starting WWE bot...")
     sent = load_sent()
+    print(f"Already sent: {len(sent)} articles")
+    
     articles = scrape_wwe_articles()
-    print(f"Found {len(articles)} articles")
+    print(f"Found on site: {len(articles)} articles")
+    print("URLs found:")
+    for a in articles:
+        print(f"  {a['url']}")
 
     new_count = 0
     for article in articles:
@@ -128,6 +128,8 @@ def main():
             sent.add(article["url"])
             new_count += 1
             print(f"  ✅ Sent: {article['title'][:60]}")
+        else:
+            print(f"  ⏭️ Skip: {article['title'][:60]}")
 
     save_sent(sent)
     print(f"Done. Sent {new_count} new articles.")
